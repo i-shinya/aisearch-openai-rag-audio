@@ -1,3 +1,7 @@
+# fork for web rtc
+
+このリポジトリは[aisearch-openai-rag-audio]([text](https://github.com/Azure-Samples/aisearch-openai-rag-audio))をweb rtcに改修したフォークです。
+
 # VoiceRAG: An Application Pattern for RAG + Voice Using Azure AI Search and the GPT-4o Realtime API for Audio
 
 [![Open in GitHub Codespaces](https://img.shields.io/static/v1?style=for-the-badge&label=GitHub+Codespaces&message=Open&color=brightgreen&logo=github)](https://github.com/codespaces/new?hide_repo_select=true&ref=main&skip_quickstart=true&machine=basicLinux32gb&repo=860141324&devcontainer_path=.devcontainer%2Fdevcontainer.json&geo=WestUs2)
