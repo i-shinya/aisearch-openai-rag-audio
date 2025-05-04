@@ -72,3 +72,9 @@ export type ExtensionMiddleTierToolResponse = {
 export type ToolResult = {
     sources: { chunk_id: string; title: string; chunk: string }[];
 };
+
+export type ChatLog = {
+    id: string;
+    type: "user" | "assistant";
+    content: string;
+};

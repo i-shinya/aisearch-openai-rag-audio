@@ -2,16 +2,64 @@ import logging
 import os
 from pathlib import Path
 
+import aiohttp
 from aiohttp import web
+from aiohttp.web_response import StreamResponse
 from azure.core.credentials import AzureKeyCredential
 from azure.identity import AzureDeveloperCliCredential, DefaultAzureCredential
 from dotenv import load_dotenv
 
-from ragtools import attach_rag_tools
+from ragtools import attach_rag_tools, search_tool_schema, grounding_tool_schema
 from rtmt import RTMiddleTier
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voicerag")
+
+async def get_token(request) -> StreamResponse:
+    # azure open aiがweb rtcに対応していなかったのでOpenAIで代用
+    url = "https://api.openai.com/v1/realtime/sessions"
+    headers = {
+        "Authorization": f"Bearer {os.environ['OPENAI_API_KEY']}",
+        "Content-Type": "application/json",
+    }
+
+    instructions = """
+        You are a helpful assistant. Only answer questions based on information you searched in the knowledge base, accessible with the 'search' tool.
+        The user is listening to answers with audio, so it's *super* important that answers are as short as possible, a single sentence if at all possible.
+        Never read file names or source names or keys out loud.
+        常に日本語で回答してね
+    """.strip()
+
+    # instructions = """
+    #     You are a helpful assistant. Only answer questions based on information you searched in the knowledge base, accessible with the 'search' tool.
+    #     The user is listening to answers with audio, so it's *super* important that answers are as short as possible, a single sentence if at all possible.
+    #     Never read file names or source names or keys out loud.
+    #     Always use the following step-by-step instructions to respond:
+    #     1. Always use the 'search' tool to check the knowledge base before answering a question.
+    #     2. Always use the 'report_grounding' tool to report the source of information from the knowledge base.
+    #     3. Produce an answer that's as short as possible. If the answer isn't in the knowledge base, say you don't know.
+    # """.strip()
+
+    tools = [
+        # search_tool_schema,
+        # grounding_tool_schema
+    ]
+    payload = {
+        "model": "gpt-4o-realtime-preview-2024-12-17",
+        "voice": "verse",
+        "instructions": instructions,
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url=url, json=payload, headers=headers) as resp:
+            print(resp.status)
+            json = await resp.json()
+            print(json)
+            client_secret = json.pop("client_secret").pop("value")
+            print(client_secret)
+    return web.json_response({"key": client_secret})
 
 async def create_app():
     if not os.environ.get("RUNNING_IN_PRODUCTION"):
@@ -33,36 +81,8 @@ async def create_app():
     search_credential = AzureKeyCredential(search_key) if search_key else credential
     
     app = web.Application()
-
-    rtmt = RTMiddleTier(
-        credentials=llm_credential,
-        endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-        deployment=os.environ["AZURE_OPENAI_REALTIME_DEPLOYMENT"],
-        voice_choice=os.environ.get("AZURE_OPENAI_REALTIME_VOICE_CHOICE") or "alloy"
-        )
-    rtmt.system_message = """
-        You are a helpful assistant. Only answer questions based on information you searched in the knowledge base, accessible with the 'search' tool. 
-        The user is listening to answers with audio, so it's *super* important that answers are as short as possible, a single sentence if at all possible. 
-        Never read file names or source names or keys out loud. 
-        Always use the following step-by-step instructions to respond: 
-        1. Always use the 'search' tool to check the knowledge base before answering a question. 
-        2. Always use the 'report_grounding' tool to report the source of information from the knowledge base. 
-        3. Produce an answer that's as short as possible. If the answer isn't in the knowledge base, say you don't know.
-    """.strip()
-
-    attach_rag_tools(rtmt,
-        credentials=search_credential,
-        search_endpoint=os.environ.get("AZURE_SEARCH_ENDPOINT"),
-        search_index=os.environ.get("AZURE_SEARCH_INDEX"),
-        semantic_configuration=os.environ.get("AZURE_SEARCH_SEMANTIC_CONFIGURATION") or None,
-        identifier_field=os.environ.get("AZURE_SEARCH_IDENTIFIER_FIELD") or "chunk_id",
-        content_field=os.environ.get("AZURE_SEARCH_CONTENT_FIELD") or "chunk",
-        embedding_field=os.environ.get("AZURE_SEARCH_EMBEDDING_FIELD") or "text_vector",
-        title_field=os.environ.get("AZURE_SEARCH_TITLE_FIELD") or "title",
-        use_vector_query=(os.environ.get("AZURE_SEARCH_USE_VECTOR_QUERY") == "true") or True
-        )
-
-    rtmt.attach_to_app(app, "/realtime")
+    app.router.add_get("/session", get_token)
+    # app.router.add_get("/tools", tools_action)
 
     current_directory = Path(__file__).parent
     app.add_routes([web.get('/', lambda _: web.FileResponse(current_directory / 'static/index.html'))])

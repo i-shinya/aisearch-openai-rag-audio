@@ -1,16 +1,13 @@
-import useWebSocket from "react-use-websocket";
-
 import {
-    InputAudioBufferAppendCommand,
-    InputAudioBufferClearCommand,
     Message,
     ResponseAudioDelta,
     ResponseAudioTranscriptDelta,
     ResponseDone,
-    SessionUpdateCommand,
     ExtensionMiddleTierToolResponse,
-    ResponseInputAudioTranscriptionCompleted
+    ResponseInputAudioTranscriptionCompleted,
+    ChatLog
 } from "@/types";
+import { useEffect, useRef, useState } from "react";
 
 type Parameters = {
     useDirectAoaiApi?: boolean; // If true, the middle tier will be skipped and the AOAI ws API will be called directly
@@ -24,6 +21,7 @@ type Parameters = {
     onWebSocketError?: (event: Event) => void;
     onWebSocketMessage?: (event: MessageEvent<any>) => void;
 
+    onDataChannelOpened?: () => void;
     onReceivedResponseAudioDelta?: (message: ResponseAudioDelta) => void;
     onReceivedInputAudioBufferSpeechStarted?: (message: Message) => void;
     onReceivedResponseDone?: (message: ResponseDone) => void;
@@ -34,106 +32,203 @@ type Parameters = {
 };
 
 export default function useRealTime({
-    useDirectAoaiApi,
-    aoaiEndpointOverride,
-    aoaiApiKeyOverride,
-    aoaiModelOverride,
-    enableInputAudioTranscription,
-    onWebSocketOpen,
-    onWebSocketClose,
-    onWebSocketError,
-    onWebSocketMessage,
+    onDataChannelOpened,
     onReceivedResponseDone,
-    onReceivedResponseAudioDelta,
     onReceivedResponseAudioTranscriptDelta,
     onReceivedInputAudioBufferSpeechStarted,
     onReceivedExtensionMiddleTierToolResponse,
-    onReceivedInputAudioTranscriptionCompleted,
     onReceivedError
 }: Parameters) {
-    const wsEndpoint = useDirectAoaiApi
-        ? `${aoaiEndpointOverride}/openai/realtime?api-key=${aoaiApiKeyOverride}&deployment=${aoaiModelOverride}&api-version=2024-10-01-preview`
-        : `/realtime`;
+    const dataChannelRef = useRef<RTCDataChannel | null>(null);
+    const peerConnection = useRef<RTCPeerConnection | null>(null);
+    const [chatLogs, setChatLogs] = useState<ChatLog[]>([]);
 
-    const { sendJsonMessage } = useWebSocket(wsEndpoint, {
-        onOpen: () => onWebSocketOpen?.(),
-        onClose: () => onWebSocketClose?.(),
-        onError: event => onWebSocketError?.(event),
-        onMessage: event => onMessageReceived(event),
-        shouldReconnect: () => true
-    });
+    const startSession = async (audioTrack: MediaStreamTrack, _: (stream: MediaStream) => void) => {
+        const tokenResponse = await fetch("/session");
+        const data = await tokenResponse.json();
+        const EPHEMERAL_KEY = data.key;
 
-    const startSession = () => {
-        const command: SessionUpdateCommand = {
-            type: "session.update",
-            session: {
-                turn_detection: {
-                    type: "server_vad"
-                }
+        const pc = new RTCPeerConnection();
+        pc.addTrack(audioTrack); // 音声入力
+        pc.ontrack = event => {
+            console.log("ontrack");
+            // 音声出力（雑だが・・・）
+            const [stream] = event.streams;
+            const audio = new Audio();
+            audio.srcObject = stream;
+            audio.play();
+        };
+
+        const dc = pc.createDataChannel("oai-events");
+        dc.onmessage = handleMessage;
+        dataChannelRef.current = dc;
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const baseUrl = "https://api.openai.com/v1/realtime";
+        const model = "gpt-4o-realtime-preview-2024-12-17";
+        const sdpResponse = await fetch(`${baseUrl}?model=${model}`, {
+            method: "POST",
+            body: offer.sdp,
+            headers: {
+                Authorization: `Bearer ${EPHEMERAL_KEY}`,
+                "Content-Type": "application/sdp"
             }
-        };
+        });
 
-        if (enableInputAudioTranscription) {
-            command.session.input_audio_transcription = {
-                model: "whisper-1"
-            };
+        const answer: RTCSessionDescriptionInit = {
+            type: "answer" as RTCSdpType,
+            sdp: await sdpResponse.text()
+        };
+        await pc.setRemoteDescription(answer);
+
+        peerConnection.current = pc;
+    };
+
+    useEffect(() => {
+        if (dataChannelRef.current) {
+            dataChannelRef.current.addEventListener("message", e => {
+                handleMessage(e);
+            });
+
+            dataChannelRef.current.addEventListener("open", () => {
+                console.log("dataChannel opened");
+                onDataChannelOpened?.();
+            });
         }
+    }, [dataChannelRef.current]);
 
-        sendJsonMessage(command);
-    };
-
-    const addUserAudio = (base64Audio: string) => {
-        const command: InputAudioBufferAppendCommand = {
-            type: "input_audio_buffer.append",
-            audio: base64Audio
-        };
-
-        sendJsonMessage(command);
-    };
-
-    const inputAudioBufferClear = () => {
-        const command: InputAudioBufferClearCommand = {
-            type: "input_audio_buffer.clear"
-        };
-
-        sendJsonMessage(command);
-    };
-
-    const onMessageReceived = (event: MessageEvent<any>) => {
-        onWebSocketMessage?.(event);
-
-        let message: Message;
-        try {
-            message = JSON.parse(event.data);
-        } catch (e) {
-            console.error("Failed to parse JSON message:", e);
-            throw e;
-        }
-
+    const handleMessage = async (event: MessageEvent) => {
+        const message = JSON.parse(event.data);
+        console.log("message", message);
         switch (message.type) {
+            case "session.created":
+            case "response.function_call_arguments.delta":
+            case "response.function_call_arguments.done":
+            case "response.output_item.added":
+                break;
+            case "conversation.item.created":
+                if (message.item?.type === "function_call") {
+                    console.log("function_call", message.item);
+                    return;
+                } else if (message.item?.type === "function_call_output") {
+                    console.log("function_call_output", message.item);
+                    return;
+                }
+                break;
+            case "response.output_item.done":
+                if (message.item?.type === "function_call") {
+                    await handleFunctionCallResult(message.item);
+                    dataChannelRef.current?.send(
+                        JSON.stringify({
+                            type: "response.create"
+                        })
+                    );
+                    return;
+                }
+                break;
             case "response.done":
-                onReceivedResponseDone?.(message as ResponseDone);
+                if (message.response?.output) {
+                    message.response.output = message.response.output.filter((output: { type: string }) => output.type !== "function_call");
+                }
+                onReceivedResponseDone?.(message);
                 break;
             case "response.audio.delta":
-                onReceivedResponseAudioDelta?.(message as ResponseAudioDelta);
+                // web RTCだと音声はデータチャネルではなく、RTCPeerConnectionのイベントで取得されるのでここには入ってこない
+                // onReceivedResponseAudioDelta?.(message as ResponseAudioDelta);
                 break;
             case "response.audio_transcript.delta":
-                onReceivedResponseAudioTranscriptDelta?.(message as ResponseAudioTranscriptDelta);
+                onReceivedResponseAudioTranscriptDelta?.(message);
                 break;
             case "input_audio_buffer.speech_started":
                 onReceivedInputAudioBufferSpeechStarted?.(message);
                 break;
             case "conversation.item.input_audio_transcription.completed":
-                onReceivedInputAudioTranscriptionCompleted?.(message as ResponseInputAudioTranscriptionCompleted);
+                // 文字起こしされた入力音声はここに入ってくる
+                setChatLogs(prev => [
+                    ...prev,
+                    {
+                        id: message.item_id,
+                        type: "user",
+                        content: message.transcript
+                    }
+                ]);
+                break;
+            case "response.audio_transcript.done":
+                // 音声のテキスト版が入ってる
+                setChatLogs(prev => [
+                    ...prev,
+                    {
+                        id: message.item_id,
+                        type: "assistant",
+                        content: message.transcript
+                    }
+                ]);
                 break;
             case "extension.middle_tier_tool_response":
-                onReceivedExtensionMiddleTierToolResponse?.(message as ExtensionMiddleTierToolResponse);
+                // これはrealtime apiのeventではなくツール実行結果を送信するためバックエンドから送信されるevent
+                onReceivedExtensionMiddleTierToolResponse?.(message);
                 break;
             case "error":
                 onReceivedError?.(message);
                 break;
+            default:
+                // 以下はここに入ってきてる
+                // response.content_part.done
+                break;
         }
     };
 
-    return { startSession, addUserAudio, inputAudioBufferClear };
+    const handleFunctionCallResult = async (item: any) => {
+        if (item.name === "search") {
+            console.log("search tools", item);
+            const { search_word } = JSON.parse(item.arguments);
+            const searchResult = await fetch(`/search?query=${encodeURIComponent(search_word)}`, {
+                method: "GET",
+                headers: {
+                    "Content-Type": "application/json"
+                }
+            });
+            const resultJson = await searchResult.json();
+            console.log("resultJson", resultJson);
+            // web RTCでツール実行結果を送信
+            const event = {
+                type: "conversation.item.create",
+                item: {
+                    type: "function_call_output",
+                    call_id: item.call_id,
+                    output: JSON.stringify(resultJson)
+                }
+            };
+            dataChannelRef.current?.send(JSON.stringify(event));
+        }
+        return null;
+    };
+
+    const clearChatlogs = () => {
+        setChatLogs([]);
+    };
+
+    const inputAudioBufferClear = () => {
+        // データチャネルのクローズ
+        if (dataChannelRef.current) {
+            dataChannelRef.current.close();
+            dataChannelRef.current = null;
+        }
+
+        if (peerConnection.current) {
+            // トラックの停止
+            peerConnection.current.getSenders().forEach(sender => {
+                if (sender.track) {
+                    sender.track.stop();
+                }
+            });
+            // コネクションのクローズ
+            peerConnection.current.close();
+            peerConnection.current = null;
+        }
+    };
+
+    return { startSession, inputAudioBufferClear, chatLogs, clearChatlogs };
 }

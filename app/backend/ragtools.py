@@ -8,7 +8,7 @@ from azure.search.documents.models import VectorizableTextQuery
 
 from rtmt import RTMiddleTier, Tool, ToolResult, ToolResultDirection
 
-_search_tool_schema = {
+search_tool_schema = {
     "type": "function",
     "name": "search",
     "description": "Search the knowledge base. The knowledge base is in English, translate to and from English if " + \
@@ -27,7 +27,7 @@ _search_tool_schema = {
     }
 }
 
-_grounding_tool_schema = {
+grounding_tool_schema = {
     "type": "function",
     "name": "report_grounding",
     "description": "Report use of a source from the knowledge base as part of an answer (effectively, cite the source). Sources " + \

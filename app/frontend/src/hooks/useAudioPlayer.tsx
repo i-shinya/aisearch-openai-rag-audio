@@ -1,27 +1,29 @@
 import { useRef } from "react";
 
-import { Player } from "@/components/audio/player";
-
-const SAMPLE_RATE = 24000;
-
 export default function useAudioPlayer() {
-    const audioPlayer = useRef<Player>();
+    const audioRef = useRef<HTMLAudioElement | null>(null);
 
     const reset = () => {
-        audioPlayer.current = new Player();
-        audioPlayer.current.init(SAMPLE_RATE);
+        audioRef.current = new Audio();
     };
 
-    const play = (base64Audio: string) => {
-        const binary = atob(base64Audio);
-        const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
-        const pcmData = new Int16Array(bytes.buffer);
+    const play = (stream: MediaStream) => {
+        // NOTE: この方法だと音声が流れる
+        // const audio = new Audio();
+        // audio.srcObject = stream;
+        // audio.play();
 
-        audioPlayer.current?.play(pcmData);
+        // FIXME: この方法だと音声が流れない・・・原因が良く分からないのであとで調査する
+        if (audioRef.current) {
+            audioRef.current.srcObject = stream;
+            audioRef.current.play().catch(error => console.error("Play error:", error));
+        }
     };
 
     const stop = () => {
-        audioPlayer.current?.stop();
+        if (audioRef.current) {
+            audioRef.current.pause();
+        }
     };
 
     return { reset, play, stop };
